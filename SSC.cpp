@@ -61,7 +61,7 @@ float Summate( const std::vector< float > & WVec , const std::vector< Imath::V3f
     return Result ;
 }
 
-void SolveU( float * U , const Imath::V3f & X , float RSearch , float RPoint , std::vector< Imath::V3f > & PVec , const std::vector< Imath::V3f > & NVec , const std::vector< float > & RVec )
+void SolveUDirectly( float * U , const Imath::V3f & X , float RSearch , float RPoint , std::vector< Imath::V3f > & PVec , const std::vector< Imath::V3f > & NVec , const std::vector< float > & RVec )
 {
     //
     std::vector< Imath::V3f > PNearVec ;
@@ -100,8 +100,16 @@ void SolveU( float * U , const Imath::V3f & X , float RSearch , float RPoint , s
                    * ( Summate( WVec , PNearVec , NNearVec ) - Summate( WNVec , PNearVec ) .dot( Summate( WVec , NNearVec ) ) )
                    / ( Summate( WVec , PNearVec , PNearVec ) - Summate( WNVec , PNearVec ) .dot( Summate( WVec , PNearVec ) ) ) ;
 
-    //
+    Imath::V3f ULinear = Summate( WNVec , NVec ) - 2.0f * UQuadric * Summate( WNVec , PNearVec ) ;
 
+    float UConstant = - ULinear.dot( Summate( WNVec , PNearVec ) ) - UQuadric * Summate( WNVec , PNearVec , PNearVec ) ;
+
+    //
+    U[0] = UConstant ;
+    U[1] = ULinear.x ;
+    U[2] = ULinear.y ;
+    U[3] = ULinear.z ;
+    U[4] = UQuadric ;
 }
 
 int main( int Argc , char * Argv[] )
