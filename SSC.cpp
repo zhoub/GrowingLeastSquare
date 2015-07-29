@@ -61,7 +61,7 @@ float Summate( const std::vector< float > & WVec , const std::vector< Imath::V3f
     return Result ;
 }
 
-void SolveUDirectly( float * U , const Imath::V3f & X , float RSearch , float RPoint , std::vector< Imath::V3f > & PVec , const std::vector< Imath::V3f > & NVec , const std::vector< float > & RVec )
+void SolveU( float * U , const Imath::V3f & X , float RSearch , float RPoint , std::vector< Imath::V3f > & PVec , const std::vector< Imath::V3f > & NVec )
 {
     //
     std::vector< Imath::V3f > PNearVec ;
@@ -114,9 +114,9 @@ void SolveUDirectly( float * U , const Imath::V3f & X , float RSearch , float RP
 
 int main( int Argc , char * Argv[] )
 {
-    const int NumSamples = 16 ;
+    const int NumSamples = 10000 ;
 
-    const Imath::V3f Center( 0.5f , 1.5f , 2.5f ) ;
+    const Imath::V3f Center( 0 ) ;
     const float R = 100.0f ;
 
     //
@@ -126,10 +126,18 @@ int main( int Argc , char * Argv[] )
     GenerateSamples( PVec , NVec , NumSamples , Center , R ) ;
 
     //
+    const Imath::V3f & X = PVec.front() ;
+
     float U[5] = { 0.0f , 0.0f , 0.0f , 0.0f , 0.0f } ;
-    for ( int i = 0 ; i < NumSamples ; ++ i )
-    {
-    }
+    SolveU( U , X , 10.0f , 20.0f , PVec , NVec ) ;
+
+    float S = 1.0f * U[0] +
+              X.x * U[1] +
+              X.y * U[2] +
+              X.z * U[3] +
+              X.length2() * U[4] ;
+
+    //
 
     return EXIT_SUCCESS ;
 }
