@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <vector>
 
+#include <OpenEXR/ImathColor.h>
+#include <OpenEXR/ImathMatrix.h>
 #include <OpenEXR/ImathVec.h>
 
 #include <sfcnn.hpp>
@@ -220,7 +222,30 @@ void SearchPoint()
     std::copy( NeighborIdxVec.begin() , NeighborIdxVec.end() , std::ostream_iterator< int >( std::cout , "," ) ) ;
 }
 
-void ReadPointCloud( Imath::Box3f & Bound , std::vector< Imath::V3f > & PVec , std::vector< Imath::V3f > & NVec , float & RAverage , const char * FilePath )
+struct PointCloud
+{
+    PointCloud()
+    :
+    mFormat( 0.0f , 0.0f , 0.0f ) ,
+    mKaRange( FLT_MAX , - FLT_MAX )
+    {
+        mBound.makeEmpty() ;
+    }
+
+    Imath::Box3f mBound ;
+    float        mW2E[16] ;
+    float        mW2NDC[16] ;
+    Imath::V3f   mFormat ;
+
+    std::vector< Imath::V3f > mPVec ;
+    std::vector< Imath::V3f > mNVec ;
+    std::vector< float >      mRVec ;
+
+    std::vector< float >      mKaVec ;
+    Imath::V2f                mKaRange ;
+} ;
+
+void ReadPointCloud( PointCloud & PC , float & RAverage , const char * FilePath )
 {
     PtcPointCloud PTCHandle = PtcSafeOpenPointCloudFile( FilePath ) ;
     if ( ! PTCHandle )
@@ -231,10 +256,17 @@ void ReadPointCloud( Imath::Box3f & Bound , std::vector< Imath::V3f > & PVec , s
     int NumPoints = 0 ;
     PtcGetPointCloudInfo( PTCHandle , "npoints" , & NumPoints ) ;
 
-    PtcGetPointCloudInfo( PTCHandle , "bbox" , & Bound.min.x ) ;
+    PtcGetPointCloudInfo( PTCHandle , "bbox" , & PC.mBound.min.x ) ;
 
-    PVec.reserve( NumPoints ) ;
-    NVec.reserve( NumPoints ) ;
+    PtcGetPointCloudInfo( PTCHandle , "world2eye" , PC.mW2E ) ;
+
+    PtcGetPointCloudInfo( PTCHandle , "world2ndc" , PC.mW2NDC ) ;
+
+    PtcGetPointCloudInfo( PTCHandle , "format" , & PC.mFormat.x ) ;
+
+    PC.mPVec.reserve( NumPoints ) ;
+    PC.mNVec.reserve( NumPoints ) ;
+    PC.mRVec.reserve( NumPoints ) ;
     RAverage = 0.0f ;
     float PerPointData[32];
 
@@ -244,47 +276,77 @@ void ReadPointCloud( Imath::Box3f & Bound , std::vector< Imath::V3f > & PVec , s
         float R = - 1.0f ;
         PtcReadDataPoint( PTCHandle , & P.x , & N.x , & R , PerPointData ) ;
 
-        PVec.push_back( P ) ;
-        NVec.push_back( N ) ;
+        PC.mPVec.push_back( P ) ;
+        PC.mNVec.push_back( N ) ;
+        PC.mRVec.push_back( R ) ;
 
         RAverage += R ;
     }
     RAverage /= NumPoints ;
 
+    PC.mKaVec.resize( NumPoints , 0.0f ) ;
+
     PtcClosePointCloudFile( PTCHandle ) , PTCHandle = NULL ;
+}
+
+void WritePointCloud( const char * FilePath  , PointCloud & PC )
+{
+    static const int NumVars = 1 ;
+    const char * VarTypeArray[NumVars] = { "color" } ;
+    const char * VarNameArray[NumVars] = { "Ka" } ;
+
+    PtcPointCloud PTCHandle = PtcCreatePointCloudFile( FilePath , NumVars , VarTypeArray , VarNameArray , PC.mW2E , PC.mW2NDC , & PC.mFormat.x ) ;
+    if ( ! PTCHandle )
+    {
+        exit( EXIT_FAILURE ) ;
+    }
+
+    const Imath::C3f kRed( 1.0f , 0.0f , 0.0f ) ;
+    const Imath::C3f kBlue( 0.0f , 1.0f , 0.0f ) ;
+
+    for ( std::vector< Imath::V3f >::size_type i = 0 ; i < PC.mPVec.size() ; ++ i )
+    {
+        const float x = ( PC.mKaVec[i] - PC.mKaRange.x ) / ( PC.mKaRange.y - PC.mKaRange.x ) ;
+        Imath::C3f KaColor = ( 1.0f - x ) * kRed + x * kBlue ;
+        PtcWriteDataPoint( PTCHandle , & PC.mPVec[i].x , & PC.mNVec[i].x , PC.mRVec[i] , & KaColor.x ) ;
+    }
+
+    PtcFinishPointCloudFile( PTCHandle ) ;
 }
 
 int main( int Argc , char * Argv[] )
 {
     -- Argc , ++ Argv ;
-    if ( Argc != 2 )
+    if ( Argc != 3 )
     {
         return EXIT_FAILURE ;
     }
 
     //
-    const char * PTCFilePath = Argv[0] ;
-    const float H = static_cast< float >( atof( Argv[1] ) ) ;
+    const char * InPTCFilePath  = Argv[0] ;
+    const char * OutPTCFilePath = Argv[1] ;
+    const float H = static_cast< float >( atof( Argv[2] ) ) ;
 
     //
-    Imath::Box3f Bound ;
-    std::vector< Imath::V3f > PVec ;
-    std::vector< Imath::V3f > NVec ;
+    PointCloud PC ;
+
     float RAverage = - 1.0f ;
-    ReadPointCloud( Bound , PVec , NVec , RAverage , PTCFilePath ) ;
+    ReadPointCloud( PC , RAverage , InPTCFilePath ) ;
 
     const float R = RAverage * 10 ;
 
     //
-    sfcnn< Imath::V3f , 3 , float > ANN( & PVec[0] , PVec.size() ) ;
+    sfcnn< Imath::V3f , 3 , float > ANN( & PC.mPVec[0] , PC.mPVec.size() ) ;
 
-    const int NumThreads = 1 ;
+    const int NumThreads = 8 ;
     omp_set_num_threads( NumThreads ) ;
 
     std::vector< unsigned long > LocalIVecPool[NumThreads] ;
     std::vector< double > LocalDVecPool[NumThreads] ;
     std::vector< Imath::V3f > LocalPVecPool[NumThreads] ;
-    std::vector< Imath::V3f > LocalNVecPool[NumThreads];
+    std::vector< Imath::V3f > LocalNVecPool[NumThreads] ;
+
+    Imath::V2f KaMinMaxPool[NumThreads] ;
 
     for ( int i = 0 ; i < NumThreads ; ++ i )
     {
@@ -292,14 +354,16 @@ int main( int Argc , char * Argv[] )
         LocalDVecPool[i].reserve( 1024 ) ;
         LocalPVecPool[i].reserve( 1024 ) ;
         LocalNVecPool[i].reserve( 1024 ) ;
+
+        KaMinMaxPool[i] = Imath::V2f( FLT_MAX , - FLT_MAX ) ;
     }
 
     #pragma omp parallel
     {
         #pragma omp for
-        for ( int i = 0 ; i < static_cast< int >( PVec.size() ) ; ++ i )
+        for ( int i = 0 ; i < static_cast< int >( PC.mPVec.size() ) ; ++ i )
         {
-            const Imath::V3f & X = PVec[i];
+            const Imath::V3f & X = PC.mPVec[i];
 
             //
             const int ThreadId = omp_get_thread_num() ;
@@ -333,8 +397,8 @@ int main( int Argc , char * Argv[] )
             size_t NumNeighbors = std::upper_bound( LocalDVec.begin() , LocalDVec.end() , static_cast< double >( R * R ) , std::less< double >() ) - LocalDVec.begin() ;
             for ( std::vector< unsigned long >::const_iterator itr = LocalIVec.begin() ; itr != ( LocalIVec.begin() + NumNeighbors ) ; ++ itr )
             {
-                LocalPVec.push_back( PVec[* itr] ) ;
-                LocalNVec.push_back( NVec[* itr] ) ;
+                LocalPVec.push_back( PC.mPVec[* itr] ) ;
+                LocalNVec.push_back( PC.mNVec[* itr] ) ;
             }
 
             float U[5] = { 0.0f , 0.0f , 0.0f , 0.0f , 0.0f } ;
@@ -348,9 +412,25 @@ int main( int Argc , char * Argv[] )
                       U[3] * X.z +
                       U[4] * X.length2() ;
             float Ka = 2.0f * UHat[4] ;
-            printf( "S(x) = %f, Ka = %f\n" , S , Ka ) ;
+
+            PC.mKaVec[i] = Ka ;
+
+            Imath::V2f & KaMinMax = KaMinMaxPool[ThreadId] ;
+            KaMinMax.x = std::min( KaMinMax.x , Ka ) ;
+            KaMinMax.y = std::max( KaMinMax.y , Ka ) ;
         }
     }
+
+    for ( int i = 0 ; i < NumThreads ; ++ i )
+    {
+        PC.mKaRange.x = std::min( PC.mKaRange.x , KaMinMaxPool[i].x ) ;
+        PC.mKaRange.y = std::max( PC.mKaRange.y , KaMinMaxPool[i].y ) ;
+    }
+
+    printf( "Ka = (%f %f)" , PC.mKaRange.x , PC.mKaRange.y ) ;
+
+    //
+    WritePointCloud( OutPTCFilePath , PC ) ;
 
     return EXIT_SUCCESS ;
 }
