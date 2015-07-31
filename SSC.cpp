@@ -12,6 +12,10 @@
 
 #include <sfcnn.hpp>
 
+#include <pointcloud.h>
+
+#include <omp.h>
+
 #include "SpatialGrid.h"
 
 void GenerateSamples( std::vector< Imath::V3f > & PVec , std::vector< Imath::V3f > & NVec , int NumSamples , const Imath::V3f & Center , float R )
@@ -68,27 +72,16 @@ float Summate( const std::vector< float > & WVec , const std::vector< Imath::V3f
     return Result ;
 }
 
-void SolveU( float * U , float * UHat , const Imath::V3f & X , float RSearch , float RPoint , std::vector< Imath::V3f > & PVec , const std::vector< Imath::V3f > & NVec )
+void SolveU( float * U , float * UHat , const Imath::V3f & X , float RSearch , float RPoint , float H , std::vector< Imath::V3f > & PNearVec , const std::vector< Imath::V3f > & NNearVec )
 {
-    //
-    std::vector< Imath::V3f > PNearVec ;
-    std::vector< Imath::V3f > NNearVec ;
-
     float TotalW = 0.0f ;
     std::vector< float > WVec ;
 
-    for ( std::vector< Imath::V3f >::size_type i = 0 ; i < PVec.size() ; ++ i )
+    for ( std::vector< Imath::V3f >::size_type i = 0 ; i < PNearVec.size() ; ++ i )
     {
-        float Distance = ( PVec[i] - X ).length() ;
-        if ( Distance < RSearch )
-        {
-            PNearVec.push_back( PVec[i] ) ;
-            NNearVec.push_back( NVec[i] ) ;
-
-            float W = EvaluateWeight( X , PVec[i] , RPoint , 1.0f ) ;
-            WVec.push_back( W ) ;
-            TotalW += W ;
-        }
+        float W = EvaluateWeight( X , PNearVec[i] , RPoint , H ) ;
+        WVec.push_back( W ) ;
+        TotalW += W ;
     }
 
     std::vector< float > WNVec( WVec ) ;
@@ -97,17 +90,12 @@ void SolveU( float * U , float * UHat , const Imath::V3f & X , float RSearch , f
         WNVec[i] /= TotalW ;
     }
 
-    if ( ! PNearVec.size() )
-    {
-        exit( EXIT_FAILURE ) ;
-    }
-
     //
     float UQuadric = 0.5f
                    * ( Summate( WVec , PNearVec , NNearVec ) - Summate( WNVec , PNearVec ) .dot( Summate( WVec , NNearVec ) ) )
                    / ( Summate( WVec , PNearVec , PNearVec ) - Summate( WNVec , PNearVec ) .dot( Summate( WVec , PNearVec ) ) ) ;
 
-    Imath::V3f ULinear = Summate( WNVec , NVec ) - 2.0f * UQuadric * Summate( WNVec , PNearVec ) ;
+    Imath::V3f ULinear = Summate( WNVec , NNearVec ) - 2.0f * UQuadric * Summate( WNVec , PNearVec ) ;
 
     float UConstant = - ULinear.dot( Summate( WNVec , PNearVec ) ) - UQuadric * Summate( WNVec , PNearVec , PNearVec ) ;
 
@@ -118,7 +106,6 @@ void SolveU( float * U , float * UHat , const Imath::V3f & X , float RSearch , f
     U[3] = ULinear.z ;
     U[4] = UQuadric ;
 
-    //
     float ULength = sqrtf( ULinear.length2() - 4.0f * UConstant * UQuadric ) ;
     for ( int i = 0 ; i < 5 ; ++ i )
     {
@@ -132,6 +119,7 @@ void FitSphere()
 
     const Imath::V3f Center( 0 ) ;
     const float R = 100.0f ;
+    const float H = 1.0f ;
 
     //
     std::vector< Imath::V3f > PVec ;
@@ -144,7 +132,7 @@ void FitSphere()
 
     float U[5] = { 0.0f , 0.0f , 0.0f , 0.0f , 0.0f } ;
     float UHat[5] = { 0.0f , 0.0f , 0.0f , 0.0f , 0.0f } ;
-    SolveU( U , UHat , X , 5.0f , 10.0f , PVec , NVec ) ;
+    SolveU( U , UHat , X , 5.0f , 10.0f , H , PVec , NVec ) ;
 
     std::cout << "U : " << std::endl ;
     std::copy(     U ,   U + 5 , std::ostream_iterator< float >( std::cout , " " ) ) ;
@@ -167,15 +155,15 @@ void FitSphere()
 
 void SearchPoint()
 {
-    const float CellSize = 2.5f ;
+    const float CellSize = 0.5f ;
 
     //
-    const int NumSamples = 50000 ;
+    const int NumSamples = 500 ;
 
     std::vector< Imath::V3f > PVec ; PVec.reserve( NumSamples ) ;
     for ( int i = 0 ; i < NumSamples ; ++ i )
     {
-        Imath::V3f P( static_cast< float >( rand() ) / RAND_MAX * 10.0f ,
+        Imath::V3f P( static_cast< float >( rand() ) / RAND_MAX *  1.0f ,
                       static_cast< float >( rand() ) / RAND_MAX * 10.0f ,
                       static_cast< float >( rand() ) / RAND_MAX * 10.0f ) ;
 
@@ -193,14 +181,15 @@ void SearchPoint()
 
 
     //
-    std::vector< unsigned long > KNNIdxVec ;
+    std::vector< unsigned long > KNNIdxVec ; KNNIdxVec.reserve( 1000 ) ;
+    std::vector< double > DistVec ; DistVec.reserve( 1000 ) ;
 
-    sfcnn< Imath::V3f , 3 , float > ANN( & PVec[0] , NumSamples ) ;
-    std::vector< double > DistVec ;
+    sfcnn< Imath::V3f , 3 , float > ANN( & PVec[0] , NumSamples , 4 ) ;
+    
 
     QueryPerformanceFrequency(&Frequency); 
     QueryPerformanceCounter(&StartingTime);
-    ANN.ksearch( X , 200 , KNNIdxVec , DistVec ) ;
+    ANN.ksearch( X , 100 , KNNIdxVec , DistVec ) ;
 
     //
     QueryPerformanceCounter(&EndingTime);
@@ -231,9 +220,137 @@ void SearchPoint()
     std::copy( NeighborIdxVec.begin() , NeighborIdxVec.end() , std::ostream_iterator< int >( std::cout , "," ) ) ;
 }
 
+void ReadPointCloud( Imath::Box3f & Bound , std::vector< Imath::V3f > & PVec , std::vector< Imath::V3f > & NVec , float & RAverage , const char * FilePath )
+{
+    PtcPointCloud PTCHandle = PtcSafeOpenPointCloudFile( FilePath ) ;
+    if ( ! PTCHandle )
+    {
+        exit( EXIT_FAILURE ) ;
+    }
+
+    int NumPoints = 0 ;
+    PtcGetPointCloudInfo( PTCHandle , "npoints" , & NumPoints ) ;
+
+    PtcGetPointCloudInfo( PTCHandle , "bbox" , & Bound.min.x ) ;
+
+    PVec.reserve( NumPoints ) ;
+    NVec.reserve( NumPoints ) ;
+    RAverage = 0.0f ;
+    float PerPointData[32];
+
+    for ( int i = 0 ; i < NumPoints ; ++ i )
+    {
+        Imath::V3f P( 0.0f ) , N( 0.0f ) ;
+        float R = - 1.0f ;
+        PtcReadDataPoint( PTCHandle , & P.x , & N.x , & R , PerPointData ) ;
+
+        PVec.push_back( P ) ;
+        NVec.push_back( N ) ;
+
+        RAverage += R ;
+    }
+    RAverage /= NumPoints ;
+
+    PtcClosePointCloudFile( PTCHandle ) , PTCHandle = NULL ;
+}
+
 int main( int Argc , char * Argv[] )
 {
-    SearchPoint() ;
+    -- Argc , ++ Argv ;
+    if ( Argc != 2 )
+    {
+        return EXIT_FAILURE ;
+    }
+
+    //
+    const char * PTCFilePath = Argv[0] ;
+    const float H = static_cast< float >( atof( Argv[1] ) ) ;
+
+    //
+    Imath::Box3f Bound ;
+    std::vector< Imath::V3f > PVec ;
+    std::vector< Imath::V3f > NVec ;
+    float RAverage = - 1.0f ;
+    ReadPointCloud( Bound , PVec , NVec , RAverage , PTCFilePath ) ;
+
+    const float R = RAverage * 10 ;
+
+    //
+    sfcnn< Imath::V3f , 3 , float > ANN( & PVec[0] , PVec.size() ) ;
+
+    const int NumThreads = 1 ;
+    omp_set_num_threads( NumThreads ) ;
+
+    std::vector< unsigned long > LocalIVecPool[NumThreads] ;
+    std::vector< double > LocalDVecPool[NumThreads] ;
+    std::vector< Imath::V3f > LocalPVecPool[NumThreads] ;
+    std::vector< Imath::V3f > LocalNVecPool[NumThreads];
+
+    for ( int i = 0 ; i < NumThreads ; ++ i )
+    {
+        LocalIVecPool[i].reserve( 1024 ) ;
+        LocalDVecPool[i].reserve( 1024 ) ;
+        LocalPVecPool[i].reserve( 1024 ) ;
+        LocalNVecPool[i].reserve( 1024 ) ;
+    }
+
+    #pragma omp parallel
+    {
+        #pragma omp for
+        for ( int i = 0 ; i < static_cast< int >( PVec.size() ) ; ++ i )
+        {
+            const Imath::V3f & X = PVec[i];
+
+            //
+            const int ThreadId = omp_get_thread_num() ;
+
+            std::vector< unsigned long > & LocalIVec = LocalIVecPool[ThreadId] ;
+            LocalIVec.clear() ;
+
+            std::vector< double > & LocalDVec = LocalDVecPool[ThreadId] ;
+            LocalDVec.clear() ;
+
+            //
+            int NumLocalSamples = 100 ;
+            ANN.ksearch( X , NumLocalSamples , LocalIVec , LocalDVec ) ;
+
+            while ( sqrt( LocalDVec.back() ) < R )
+            {
+                NumLocalSamples *= 1.5 ;
+
+                LocalIVec.clear() ;
+                LocalDVec.clear() ;
+                ANN.ksearch( X , NumLocalSamples , LocalIVec , LocalDVec ) ;
+            }
+
+            //
+            std::vector< Imath::V3f > & LocalPVec = LocalPVecPool[ThreadId] ;
+            LocalPVec.clear() ;
+
+            std::vector< Imath::V3f > & LocalNVec = LocalNVecPool[ThreadId] ;
+            LocalNVec.clear() ;
+
+            size_t NumNeighbors = std::upper_bound( LocalDVec.begin() , LocalDVec.end() , static_cast< double >( R * R ) , std::less< double >() ) - LocalDVec.begin() ;
+            for ( std::vector< unsigned long >::const_iterator itr = LocalIVec.begin() ; itr != ( LocalIVec.begin() + NumNeighbors ) ; ++ itr )
+            {
+                LocalPVec.push_back( PVec[* itr] ) ;
+                LocalNVec.push_back( NVec[* itr] ) ;
+            }
+
+            float U[5] = { 0.0f , 0.0f , 0.0f , 0.0f , 0.0f } ;
+            float UHat[5] = { 0.0f , 0.0f , 0.0f , 0.0f , 0.0f } ;
+            SolveU( U , UHat , X , R , RAverage , H , LocalPVec , LocalNVec ) ;
+
+            //
+            float S = U[0] * 1.0f +
+                      U[1] * X.x +
+                      U[2] * X.y +
+                      U[3] * X.z +
+                      U[4] * X.length2() ;
+            float Ka = 2.0f * UHat[4] ;
+            printf( "S(x) = %f, Ka = %f\n" , S , Ka ) ;
+        }
+    }
 
     return EXIT_SUCCESS ;
 }
