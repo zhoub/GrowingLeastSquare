@@ -1,4 +1,7 @@
+#include <Windows.h>
+
 #include <iostream>
+#include <iterator>
 
 #include <cmath>
 #include <cstdlib>
@@ -6,6 +9,10 @@
 #include <vector>
 
 #include <OpenEXR/ImathVec.h>
+
+#include <sfcnn.hpp>
+
+#include "SpatialGrid.h"
 
 void GenerateSamples( std::vector< Imath::V3f > & PVec , std::vector< Imath::V3f > & NVec , int NumSamples , const Imath::V3f & Center , float R )
 {
@@ -61,7 +68,7 @@ float Summate( const std::vector< float > & WVec , const std::vector< Imath::V3f
     return Result ;
 }
 
-void SolveU( float * U , const Imath::V3f & X , float RSearch , float RPoint , std::vector< Imath::V3f > & PVec , const std::vector< Imath::V3f > & NVec )
+void SolveU( float * U , float * UHat , const Imath::V3f & X , float RSearch , float RPoint , std::vector< Imath::V3f > & PVec , const std::vector< Imath::V3f > & NVec )
 {
     //
     std::vector< Imath::V3f > PNearVec ;
@@ -110,9 +117,16 @@ void SolveU( float * U , const Imath::V3f & X , float RSearch , float RPoint , s
     U[2] = ULinear.y ;
     U[3] = ULinear.z ;
     U[4] = UQuadric ;
+
+    //
+    float ULength = sqrtf( ULinear.length2() - 4.0f * UConstant * UQuadric ) ;
+    for ( int i = 0 ; i < 5 ; ++ i )
+    {
+        UHat[i] = U[i] / ULength ;
+    }
 }
 
-int main( int Argc , char * Argv[] )
+void FitSphere()
 {
     const int NumSamples = 10000 ;
 
@@ -129,15 +143,97 @@ int main( int Argc , char * Argv[] )
     const Imath::V3f & X = PVec.front() ;
 
     float U[5] = { 0.0f , 0.0f , 0.0f , 0.0f , 0.0f } ;
-    SolveU( U , X , 10.0f , 20.0f , PVec , NVec ) ;
+    float UHat[5] = { 0.0f , 0.0f , 0.0f , 0.0f , 0.0f } ;
+    SolveU( U , UHat , X , 5.0f , 10.0f , PVec , NVec ) ;
 
-    float S = 1.0f * U[0] +
-              X.x * U[1] +
-              X.y * U[2] +
-              X.z * U[3] +
-              X.length2() * U[4] ;
+    std::cout << "U : " << std::endl ;
+    std::copy(     U ,   U + 5 , std::ostream_iterator< float >( std::cout , " " ) ) ;
+    std::cout << std::endl ;
+
+    std::cout << "UHat : " << std::endl ;
+    std::copy( UHat , UHat + 5 , std::ostream_iterator< float >( std::cout , " " ) ) ;
+    std::cout << std::endl ;
+
+    float S = U[0] * 1.0f +
+              U[1] * X.x +
+              U[2] * X.y +
+              U[3] * X.z +
+              U[4] * X.length2() ;
+    std::cout << "S(x) = " << S << std::endl ;
+
+    float Ka = 2.0f * UHat[4] ;
+    std::cout << "Ka = " << Ka << std::endl ;
+}
+
+void SearchPoint()
+{
+    const float CellSize = 2.5f ;
 
     //
+    const int NumSamples = 50000 ;
+
+    std::vector< Imath::V3f > PVec ; PVec.reserve( NumSamples ) ;
+    for ( int i = 0 ; i < NumSamples ; ++ i )
+    {
+        Imath::V3f P( static_cast< float >( rand() ) / RAND_MAX * 10.0f ,
+                      static_cast< float >( rand() ) / RAND_MAX * 10.0f ,
+                      static_cast< float >( rand() ) / RAND_MAX * 10.0f ) ;
+
+        PVec.push_back( P ) ;
+    }
+
+    //
+    Imath::V3f X( 0.5f , 1.5f , 2.5f ) ;
+    float R = 1.0f ;
+
+    //
+    LARGE_INTEGER StartingTime, EndingTime, ElapsedMicroseconds;
+    LARGE_INTEGER Frequency;
+
+
+
+    //
+    std::vector< unsigned long > KNNIdxVec ;
+
+    sfcnn< Imath::V3f , 3 , float > ANN( & PVec[0] , NumSamples ) ;
+    std::vector< double > DistVec ;
+
+    QueryPerformanceFrequency(&Frequency); 
+    QueryPerformanceCounter(&StartingTime);
+    ANN.ksearch( X , 200 , KNNIdxVec , DistVec ) ;
+
+    //
+    QueryPerformanceCounter(&EndingTime);
+    ElapsedMicroseconds.QuadPart = EndingTime.QuadPart - StartingTime.QuadPart;
+    std::cout << ElapsedMicroseconds.QuadPart << std::endl ;
+
+    //
+    std::vector< double >::const_iterator LastPos = std::upper_bound( DistVec.begin() , DistVec.end() , static_cast< double >( R ) , std::less< double >() ) ;
+    std::sort( KNNIdxVec.begin() , KNNIdxVec.begin() + ( LastPos - DistVec.begin() ) , std::less< unsigned long >() ) ;
+    std::copy( KNNIdxVec.begin() , KNNIdxVec.begin() + ( LastPos - DistVec.begin() ) , std::ostream_iterator< int >( std::cout , "," ) ) ;
+    std::cout << std::endl << std::endl ;
+
+    //
+
+    std::auto_ptr< SpatialGrid > SG( new SpatialGrid( CellSize ) ) ;
+    SG->Initialize( & PVec[0] , NumSamples ) ;
+
+    QueryPerformanceFrequency(&Frequency); 
+    QueryPerformanceCounter(&StartingTime);
+    std::vector< int > NeighborIdxVec ;
+    SG->Search( NeighborIdxVec , &PVec[0] , X , R ) ;
+
+    QueryPerformanceCounter(&EndingTime);
+    ElapsedMicroseconds.QuadPart = EndingTime.QuadPart - StartingTime.QuadPart;
+    std::cout << ElapsedMicroseconds.QuadPart << std::endl ;
+
+    std::sort( NeighborIdxVec.begin() , NeighborIdxVec.end() , std::less< int >() ) ;
+    std::copy( NeighborIdxVec.begin() , NeighborIdxVec.end() , std::ostream_iterator< int >( std::cout , "," ) ) ;
+}
+
+int main( int Argc , char * Argv[] )
+{
+    SearchPoint() ;
 
     return EXIT_SUCCESS ;
 }
