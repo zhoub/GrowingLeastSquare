@@ -1,6 +1,6 @@
 /**
  * Growing Least Square
- * Copyright (C) 2017 Bo Zhou<bo.schwarzstin@gmai.com>
+ * Copyright (C) 2017 Bo Zhou<bo.schwarzstein@gmai.com>
 
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
